@@ -222,3 +222,8 @@ Map.add(chartPanel);
     maxWidth: '520px'
   }
 });
+
+// Initialize map
+Map.centerObject(roi, 12);
+Map.add(panel);
+updateMap(2014);

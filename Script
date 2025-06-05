@@ -49,3 +49,13 @@ function calculateAWEI(image) {
 var s2WithAWEI = calculateAWEI(s2);
 var aweiWater = s2WithAWEI.select('AWEIsh').gt(0).rename('AWEI_Water');
 
+// Habitat Classification
+var ndvi = s2.normalizedDifference(['B8', 'B4']).rename('NDVI');
+var habitatBands = s2.select(['B4', 'B3', 'B2']).addBands(ndvi);
+var training = habitatBands.sample({region: roi, scale: 10, numPixels: 5000});
+var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+var habitatMap = habitatBands.cluster(clusterer);
+
+var classNames = ['Open Water','Wetlands','Grassland','Agricultural/Built-up'];
+var habitatPalette = ['#1E90FF','#228B22','#ADFF2F','#FF4500'];
+

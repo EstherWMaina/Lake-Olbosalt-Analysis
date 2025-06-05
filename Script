@@ -2,3 +2,20 @@
 // ==============================================
 var jrcDataset = ee.ImageCollection('JRC/GSW1_4/YearlyHistory')
                   .filterBounds(ee.Geometry.Point([36.43, -0.15]));
+/ PART 2: SAR WATER DETECTION (Sentinel-1)
+// ==============================================
+var sarCollection = ee.ImageCollection('COPERNICUS/S1_GRD')
+                   .filterBounds(ee.Geometry.Point([36.43, -0.15]))
+                   .filter(ee.Filter.eq('instrumentMode', 'IW'))
+                   .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                   .map(function(image) {
+                      return image.select(['VV']).copyProperties(image, ['system:time_start']);
+                   });
+
+function calculateSARWater(image) {
+  var filtered = image.focal_mean(50, 'circle', 'meters'); 
+  var water = filtered.lt(-16); 
+  return water.rename('SAR_Water').set('system:time_start', image.get('system:time_start'));
+}
+
+var sarWater = sarCollection.map(calculateSARWater);

@@ -59,3 +59,18 @@ var habitatMap = habitatBands.cluster(clusterer);
 var classNames = ['Open Water','Wetlands','Grassland','Agricultural/Built-up'];
 var habitatPalette = ['#1E90FF','#228B22','#ADFF2F','#FF4500'];
 
+// ==============================================
+// PART 4: FUSION WATER MAP
+// ==============================================
+function fusionWaterMap(year) {
+  var jrcImg = jrcDataset.filter(ee.Filter.calendarRange(year, year, 'year')).first();
+  var sarImg = sarWater.filter(ee.Filter.calendarRange(year, year, 'year')).mean();
+  
+  var fusion = ee.Image(0)
+    .where(jrcImg.eq(3), 1)  
+    .where(sarImg.eq(1), 1)  
+    .where(aweiWater.eq(1), 1) 
+    .rename('Fusion_Water');
+
+  return fusion;
+}

@@ -74,3 +74,38 @@ function fusionWaterMap(year) {
 
   return fusion;
 }
+// ==============================================
+// VISUALIZATION & UI COMPONENTS
+// ==============================================
+var waterPalette = {min: 0, max: 1, palette: ['black', 'blue']};
+var habitatVis = {min: 0, max: 4, palette: habitatPalette};
+
+var timeSlider = ui.DateSlider({
+  start: 1984 + '-01-01',
+  end: 2021 + '-12-31',
+  value: 1984 + '-01-01',
+  period: 365,
+  onChange: function(dateRange) {
+    var year = ee.Date(dateRange.start()).get('year').getInfo();
+    updateMap(year);
+    autoplayPaused = true; 
+  },
+  style: {width: '300px'}
+});
+
+function updateMap(year) {
+  Map.layers().reset();
+  
+  var jrcImg = jrcDataset.filter(ee.Filter.calendarRange(year, year, 'year')).first();
+  if (jrcImg) Map.addLayer(jrcImg.clip(roi), waterPalette, 'JRC Water ' + year);
+
+  var sarImg = sarWater.filter(ee.Filter.calendarRange(year, year, 'year')).mean();
+  if (sarImg) Map.addLayer(sarImg.clip(roi), waterPalette, 'SAR Water ' + year, false);
+
+  Map.addLayer(aweiWater.clip(roi), waterPalette, 'AWEI Water', false);
+  
+  var fusion = fusionWaterMap(year);
+  Map.addLayer(fusion.clip(roi), {min: 0, max: 1, palette: ['black', 'cyan']}, 'Fusion Water', false);
+
+  Map.addLayer(habitatMap.clip(roi), habitatVis, 'Habitat Map', false);
+}

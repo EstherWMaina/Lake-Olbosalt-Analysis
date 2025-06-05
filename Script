@@ -1,3 +1,4 @@
+
 // PART 1: OPTICAL WATER DETECTION (JRC Dataset)
 // ==============================================
 var jrcDataset = ee.ImageCollection('JRC/GSW1_4/YearlyHistory')
@@ -33,3 +34,18 @@ var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
             return image.select(['B2', 'B3', 'B4', 'B8', 'B11', 'B12']); 
           })
           .median();
+
+// AWEI Calculation
+function calculateAWEI(image) {
+  var aweiSh = image.expression(
+    'B3 + 2.5 * B8 - 1.5 * (B11 + B12) - 0.25 * B2',
+    {'B2': image.select('B2'),'B3': image.select('B3'),'B8': image.select('B8'),
+     'B11': image.select('B11'),'B12': image.select('B12')}
+  ).rename('AWEIsh');
+
+  return image.addBands(aweiSh);
+}
+
+var s2WithAWEI = calculateAWEI(s2);
+var aweiWater = s2WithAWEI.select('AWEIsh').gt(0).rename('AWEI_Water');
+

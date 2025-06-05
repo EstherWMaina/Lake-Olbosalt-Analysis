@@ -1,0 +1,4 @@
+// PART 1: OPTICAL WATER DETECTION (JRC Dataset)
+// ==============================================
+var jrcDataset = ee.ImageCollection('JRC/GSW1_4/YearlyHistory')
+                  .filterBounds(ee.Geometry.Point([36.43, -0.15]));

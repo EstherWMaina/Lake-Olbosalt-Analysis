@@ -148,3 +148,47 @@ legendItems.forEach(function(item) {
 });
 
 Map.add(legend);
+
+// ==============================================
+// USER INTERFACE
+// ==============================================
+var titleLabel = ui.Label({
+  value: "Lake Ol' Bolossat Water & Habitat Monitoring",
+  style: {
+    fontWeight: 'bold',
+    fontSize: '22px',
+    color: '#1d3c34',
+    margin: '0 0 5px 0'
+  }
+});
+
+var descriptionLabel = ui.Label({
+  value: "Lake Ol' Bolossat, a biodiverse freshwater lake in Kenya's Aberdare Range, " +
+         "faces existential threats from anthropogenic pressures and climate variability. " +
+         "This study employs geospatial technologies to map water extent and habitat " +
+         "changes between 1984-2021, identifying: (1) open water, (2) wetlands, " +
+         "(4) grasslands, and (5) agricultural/built-up.",
+  style: {
+    fontSize: '15px',
+    color: '#333333',
+    margin: '0 0 10px 0',
+    whiteSpace: 'normal',  // Allow text wrapping
+    maxWidth: '520px'  // Optional: adjust width as needed
+  }
+});
+
+
+var panel = ui.Panel({
+  widgets: [
+    titleLabel,
+    descriptionLabel,
+    ui.Label('Select year and toggle layers:'),
+    timeSlider
+  ],
+  style: {
+    position: 'top-left',
+    padding: '10px',
+    //backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    maxWidth: '520px'
+  }
+});

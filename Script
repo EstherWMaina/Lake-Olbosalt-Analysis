@@ -19,3 +19,17 @@ function calculateSARWater(image) {
 }
 
 var sarWater = sarCollection.map(calculateSARWater);
+
+// ==============================================
+// PART 3: HABITAT CLASSIFICATION
+// ==============================================
+var roi = ee.Geometry.Rectangle([36.35, -0.25, 36.50, -0.05]);
+
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
+          .filterBounds(roi)
+          .filterDate('2021-01-01', '2021-12-31')
+          .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+          .map(function(image) { 
+            return image.select(['B2', 'B3', 'B4', 'B8', 'B11', 'B12']); 
+          })
+          .median();

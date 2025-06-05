@@ -4,7 +4,6 @@
   </a>
 </div>
 
-https://drive.google.com/file/d/1mKsQHM9R5t33r4OsQgLq2RsPSQKVhrV-/view?usp=drive_link
 
 # Lake-Olbosalt-Analysis
 

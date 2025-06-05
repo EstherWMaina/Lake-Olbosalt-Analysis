@@ -189,6 +189,36 @@ var panel = ui.Panel({
     position: 'top-left',
     padding: '10px',
     //backgroundColor: 'rgba(255, 255, 255, 0.8)',
+
+// Generate a bar chart for water extent over the years
+var yearlyWaterArea = jrcDataset.map(function(img) {
+  var year = ee.Date(img.get('system:time_start')).get('year');
+  var waterArea = img.clip(roi).eq(2).multiply(ee.Image.pixelArea()).reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: roi,
+    scale: 30,
+    maxPixels: 1e13
+  }).get('waterClass');
+  return ee.Feature(null, {'year': year, 'waterArea': waterArea});
+});
+
+var waterExtentChart = ui.Chart.feature.byFeature({
+  features: yearlyWaterArea,
+  xProperty: 'year',
+  yProperties: ['waterArea']
+}).setOptions({
+  title: "Lake Ol' Bolossat Water Extent Over the Years",
+  vAxis: {title: 'Water Area (sq. km)'},
+  hAxis: {title: 'Year'},
+  colors: ['blue']
+});
+
+var chartPanel = ui.Panel({
+  widgets: [waterExtentChart],
+  style: {position: 'bottom-left', width: '350px', padding: '8px'}
+});
+Map.add(chartPanel);
+
     maxWidth: '520px'
   }
 });

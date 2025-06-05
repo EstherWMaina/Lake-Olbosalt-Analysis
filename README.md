@@ -1,6 +1,6 @@
 <div style="text-align: center;">
-  <a href="ScreenShot">
-    <img src="https://drive.google.com/file/d/1mKsQHM9R5t33r4OsQgLq2RsPSQKVhrV-/view?usp=drive_link" alt="image" width="700">
+  <a href="https://drive.google.com/file/d/1mKsQHM9R5t33r4OsQgLq2RsPSQKVhrV-/view?usp=drive_link">
+    <img src="ScreenShot" alt="image" width="700">
   </a>
 </div>
 

@@ -109,3 +109,18 @@ function updateMap(year) {
 
   Map.addLayer(habitatMap.clip(roi), habitatVis, 'Habitat Map', false);
 }
+
+// ==============================================
+// AUTO PLAY LOGIC
+// ==============================================
+var currentYear = 1984;
+var autoplayPaused = false;
+
+function autoplay() {
+  if (!autoplayPaused) {
+    timeSlider.setValue(ee.Date.fromYMD(currentYear, 1, 1));
+    currentYear++;
+    if (currentYear > 2021) currentYear = 1984;
+  }
+}
+ui.util.setInterval(autoplay, 10000);

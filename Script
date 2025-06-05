@@ -124,3 +124,27 @@ function autoplay() {
   }
 }
 ui.util.setInterval(autoplay, 10000);
+
+/ ==============================================
+// LEGEND
+// ==============================================
+var legend = ui.Panel({ style: {position: 'bottom-right', padding: '8px'} });
+legend.add(ui.Label('Water & Habitat Classification', {fontWeight: 'bold'}));
+
+var legendItems = [
+  {color: 'black', label: 'No Water'},
+  {color: 'blue', label: 'Detected Water'},
+  {color: 'cyan', label: 'Fusion Water'}
+];
+
+for (var i = 0; i < classNames.length; i++) {
+  legendItems.push({ color: habitatPalette[i], label: classNames[i] });
+}
+
+legendItems.forEach(function(item) {
+  var colorBox = ui.Label({style: {backgroundColor: item.color, padding: '8px', width: '20px', height: '20px'}});
+  var description = ui.Label({value: item.label, style: {padding: '8px'}});
+  legend.add(ui.Panel({widgets: [colorBox, description], layout: ui.Panel.Layout.Flow('horizontal')}));
+});
+
+Map.add(legend);

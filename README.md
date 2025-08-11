@@ -18,18 +18,6 @@ This repo is for a project evaluating Lake Ol'Bolsat water extent changes in Cen
 
 v## Additional Resources
 
-- **Contributors**:
-  - [Dr. Muhammad Sajjad](https://scholar.google.com.hk/citations?user=iuXamUEAAAAJ&hl=en)
-
----
-
-## License
-
-This project is licensed under the **Creative Commons Attribution 4.0 International License**.
-
-[![License: CC BY 4.0](https://licensebuttons.net/l/by/4.0/88x31.png)](http://creativecommons.org/licenses/by/4.0/)
-
----
 
 ## Keywords
 

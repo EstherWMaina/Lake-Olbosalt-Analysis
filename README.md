@@ -21,6 +21,6 @@ v## Additional Resources
 
 ## Keywords
 
-`flood`, `Pakistan`, `flood susceptibility`, `floods`, `flood risk`, `Google Earth Engine`, `geospatial`, `remote sensing`, `GIS`
+`flood`, `flood susceptibility`, `floods`, `flood risk`, `Google Earth Engine`, `geospatial`, `remote sensing`, `GIS`
 
 ---

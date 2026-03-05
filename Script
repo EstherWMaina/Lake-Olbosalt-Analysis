@@ -1,229 +1,591 @@
+// ================================================================
+// Lake Ol' Bolossat — Water Extent, Habitat & Temperature Monitor
+// ================================================================
 
-// PART 1: OPTICAL WATER DETECTION (JRC Dataset)
-// ==============================================
-var jrcDataset = ee.ImageCollection('JRC/GSW1_4/YearlyHistory')
-                  .filterBounds(ee.Geometry.Point([36.43, -0.15]));
-/ PART 2: SAR WATER DETECTION (Sentinel-1)
-// ==============================================
-var sarCollection = ee.ImageCollection('COPERNICUS/S1_GRD')
-                   .filterBounds(ee.Geometry.Point([36.43, -0.15]))
-                   .filter(ee.Filter.eq('instrumentMode', 'IW'))
-                   .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
-                   .map(function(image) {
-                      return image.select(['VV']).copyProperties(image, ['system:time_start']);
-                   });
-
-function calculateSARWater(image) {
-  var filtered = image.focal_mean(50, 'circle', 'meters'); 
-  var water = filtered.lt(-16); 
-  return water.rename('SAR_Water').set('system:time_start', image.get('system:time_start'));
-}
-
-var sarWater = sarCollection.map(calculateSARWater);
-
-// ==============================================
-// PART 3: HABITAT CLASSIFICATION
-// ==============================================
 var roi = ee.Geometry.Rectangle([36.35, -0.25, 36.50, -0.05]);
 
-var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
-          .filterBounds(roi)
-          .filterDate('2021-01-01', '2021-12-31')
-          .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
-          .map(function(image) { 
-            return image.select(['B2', 'B3', 'B4', 'B8', 'B11', 'B12']); 
-          })
-          .median();
+// ================================================================
+// LAKE MASK — restrict all outputs to Lake Ol' Bolossat only
+// ================================================================
+// Use the JRC 'max_extent' band which marks every pixel that was ever
+// classified as water at any point in the 1984–2021 record. This defines
+// the maximum possible lake boundary so no valid water pixel is excluded
+// in any individual year (e.g. a high-water year like 2003 is fully shown).
+// A small 50 m dilation catches shoreline pixels at the very edge.
+var jrcGSW = ee.Image('JRC/GSW1_4/GlobalSurfaceWater').clip(roi);
+var lakeMask = jrcGSW.select('max_extent')  // 1 = ever water, 0 = never water
+  .focal_max(50, 'circle', 'meters')        // 50 m buffer for shoreline pixels
+  .unmask(0)
+  .selfMask();                              // binary mask, 1 = within lake extent
 
-// AWEI Calculation
-function calculateAWEI(image) {
-  var aweiSh = image.expression(
-    'B3 + 2.5 * B8 - 1.5 * (B11 + B12) - 0.25 * B2',
-    {'B2': image.select('B2'),'B3': image.select('B3'),'B8': image.select('B8'),
-     'B11': image.select('B11'),'B12': image.select('B12')}
-  ).rename('AWEIsh');
+// ================================================================
+// PART 1: JRC WATER (1984–2021)
+// ================================================================
+var jrcDataset = ee.ImageCollection('JRC/GSW1_4/YearlyHistory')
+  .filterBounds(roi);
 
-  return image.addBands(aweiSh);
+// ================================================================
+// PART 2: RECENT WATER 2022–2025 (S2 NDWI + SAR)
+// ================================================================
+// Build one annual median composite per year clipped to ROI immediately.
+// Avoids memory-intensive per-month loops; annual median is sufficient
+// for detecting persistent lake water.
+
+function recentWaterYear(yr) {
+  var start = ee.Date.fromYMD(yr, 1, 1);
+  var end   = ee.Date.fromYMD(yr, 12, 31);
+
+  // S2 NDWI — annual median, cloud-screened via SCL
+  var s2col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    .filterBounds(roi).filterDate(start, end)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
+    .map(function(img) {
+      var scl  = img.select('SCL');
+      var good = scl.neq(3).and(scl.neq(8)).and(scl.neq(9))
+                    .and(scl.neq(10)).and(scl.neq(11));
+      return img.normalizedDifference(['B3','B8'])
+                .rename('ndwi').updateMask(good);
+    });
+  var s2water = ee.Image(
+    ee.Algorithms.If(
+      s2col.size().gt(0),
+      s2col.median().gt(0),
+      ee.Image.constant(0)
+    )
+  ).rename('ndwiWater').clip(roi);
+
+  // SAR — annual mean VV, no focal filter (saves memory)
+  var sarCol = ee.ImageCollection('COPERNICUS/S1_GRD')
+    .filterBounds(roi).filterDate(start, end)
+    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+    .select('VV');
+  var sarWaterAnn = ee.Image(
+    ee.Algorithms.If(
+      sarCol.size().gt(0),
+      sarCol.mean().lt(-16),
+      ee.Image.constant(0)
+    )
+  ).rename('sarWater').clip(roi);
+
+  // Union: water if either sensor detects it; cast to Byte for JRC compat
+  var water = s2water.or(sarWaterAnn).byte();
+
+  // Encode as JRC class: 2 = water detected (treat all as seasonal)
+  return ee.Image(1).byte()
+    .where(water.eq(1), 2)
+    .rename('waterClass')
+    .clip(roi)
+    .set('system:time_start', start.millis());
 }
 
-var s2WithAWEI = calculateAWEI(s2);
-var aweiWater = s2WithAWEI.select('AWEIsh').gt(0).rename('AWEI_Water');
+// Build 2022–2025 images as plain JS array (4 images, no ee.List.map overhead)
+var recentAnnual = ee.ImageCollection([
+  recentWaterYear(2022),
+  recentWaterYear(2023),
+  recentWaterYear(2024),
+  recentWaterYear(2025)
+]);
 
-// Habitat Classification
-var ndvi = s2.normalizedDifference(['B8', 'B4']).rename('NDVI');
-var habitatBands = s2.select(['B4', 'B3', 'B2']).addBands(ndvi);
-var training = habitatBands.sample({region: roi, scale: 10, numPixels: 5000});
-var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
-var habitatMap = habitatBands.cluster(clusterer);
+var jrcDatasetFull = jrcDataset.merge(recentAnnual);
 
-var classNames = ['Open Water','Wetlands','Grassland','Agricultural/Built-up'];
+// ================================================================
+// PART 3: SAR WATER DETECTION (Sentinel-1, 2014–present)
+// ================================================================
+// Apply SAR threshold without focal_mean on the full archive —
+// use a lighter spatial filter only when displaying, not when storing.
+var sarWater = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .select('VV')
+  .map(function(img) {
+    return img.lt(-16).rename('SAR_Water')
+              .clip(roi)
+              .copyProperties(img, ['system:time_start']);
+  });
+
+// ================================================================
+// PART 4: HABITAT CLASSIFICATION (Sentinel-2 2021)
+// ================================================================
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterBounds(roi)
+  .filterDate('2021-01-01', '2021-12-31')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .map(function(img) { return img.select(['B2','B3','B4','B8','B11','B12']); })
+  .median()
+  .clip(roi);
+
+var aweiWater = s2.expression(
+  'B3 + 2.5*B8 - 1.5*(B11+B12) - 0.25*B2',
+  {'B2':s2.select('B2'),'B3':s2.select('B3'),'B8':s2.select('B8'),
+   'B11':s2.select('B11'),'B12':s2.select('B12')}
+).gt(0).rename('AWEI_Water').updateMask(lakeMask);
+
+var ndvi        = s2.normalizedDifference(['B8','B4']).rename('NDVI');
+var habitatBands = s2.select(['B4','B3','B2']).addBands(ndvi);
+var training    = habitatBands.sample({region: roi, scale: 10, numPixels: 3000});
+var clusterer   = ee.Clusterer.wekaKMeans(5).train(training);
+var habitatMap  = habitatBands.cluster(clusterer).clip(roi);
+
+var classNames     = ['Open Water','Wetlands','Grassland','Agricultural/Built-up'];
 var habitatPalette = ['#1E90FF','#228B22','#ADFF2F','#FF4500'];
 
-// ==============================================
-// PART 4: FUSION WATER MAP
-// ==============================================
-function fusionWaterMap(year) {
-  var jrcImg = jrcDataset.filter(ee.Filter.calendarRange(year, year, 'year')).first();
-  var sarImg = sarWater.filter(ee.Filter.calendarRange(year, year, 'year')).mean();
-  
-  var fusion = ee.Image(0)
-    .where(jrcImg.eq(3), 1)  
-    .where(sarImg.eq(1), 1)  
-    .where(aweiWater.eq(1), 1) 
-    .rename('Fusion_Water');
-
-  return fusion;
+// ================================================================
+// PART 5: LANDSAT SURFACE TEMPERATURE (1984–2025)
+// ================================================================
+function makeLSTmap(band) {
+  return function(img) {
+    var st = img.select(band)
+      .multiply(0.00341802).add(149.0).subtract(273.15)
+      .rename('LST_C');
+    var qa    = img.select('QA_PIXEL');
+    var clear = qa.bitwiseAnd(1<<3).eq(0).and(qa.bitwiseAnd(1<<4).eq(0));
+    return st.updateMask(clear).clip(roi)
+             .copyProperties(img, ['system:time_start']);
+  };
 }
-// ==============================================
-// VISUALIZATION & UI COMPONENTS
-// ==============================================
-var waterPalette = {min: 0, max: 1, palette: ['black', 'blue']};
-var habitatVis = {min: 0, max: 4, palette: habitatPalette};
+var allLandsatST = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
+  .filterBounds(roi).filterDate('1984-01-01','2025-12-31').map(makeLSTmap('ST_B6'))
+  .merge(ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+    .filterBounds(roi).filterDate('1984-01-01','2025-12-31').map(makeLSTmap('ST_B6')))
+  .merge(ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+    .filterBounds(roi).filterDate('1984-01-01','2025-12-31').map(makeLSTmap('ST_B10')))
+  .merge(ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
+    .filterBounds(roi).filterDate('1984-01-01','2025-12-31').map(makeLSTmap('ST_B10')));
 
-var timeSlider = ui.DateSlider({
-  start: 1984 + '-01-01',
-  end: 2021 + '-12-31',
-  value: 1984 + '-01-01',
-  period: 365,
-  onChange: function(dateRange) {
-    var year = ee.Date(dateRange.start()).get('year').getInfo();
-    updateMap(year);
-    autoplayPaused = true; 
+// ================================================================
+// SAFE YEAR REDUCERS
+// ================================================================
+// ee.Algorithms.If on bandNames().size() is the only reliable way to
+// handle empty-collection reducers without type-mismatch errors.
+
+function safeJRC(year) {
+  // JRC YearlyHistory images are timestamped on Jan 1 of each year.
+  // filterDate end is EXCLUSIVE, so end must be Jan 1 of the NEXT year
+  // to capture the current year's image. Using Dec 31 misses it entirely.
+  var start = ee.Date.fromYMD(year, 1, 1);
+  var end   = ee.Date.fromYMD(ee.Number(year).add(1), 1, 1);
+  var col   = jrcDatasetFull.filterDate(start, end).sort('system:time_start');
+  return ee.Image(ee.Algorithms.If(
+    col.size().gt(0),
+    col.first().rename('waterClass').byte().updateMask(lakeMask),
+    ee.Image.constant(0).rename('waterClass').byte()
+  ));
+}
+
+function safeSAR(year) {
+  var col     = sarWater.filter(ee.Filter.calendarRange(year, year, 'year'));
+  var reduced = col.mean();
+  return ee.Image(ee.Algorithms.If(
+    reduced.bandNames().size().gt(0), reduced,
+    ee.Image.constant(0).rename('SAR_Water').float()
+  )).updateMask(lakeMask);
+}
+
+function safeLST(year) {
+  var col     = allLandsatST.filter(ee.Filter.calendarRange(year, year, 'year'));
+  var reduced = col.median();
+  return ee.Image(ee.Algorithms.If(
+    reduced.bandNames().size().gt(0), reduced,
+    ee.Image.constant(0).rename('LST_C').float()
+  )).updateMask(lakeMask);
+}
+
+// ================================================================
+// FUSION MAP & WST
+// ================================================================
+function fusionWater(year) {
+  var jrc = safeJRC(year);
+  var sar = safeSAR(year);
+  return ee.Image(0)
+    .where(jrc.eq(3), 1)
+    .where(sar.gt(0), 1)
+    .where(aweiWater.eq(1), 1)
+    .rename('Fusion_Water');
+}
+
+function waterSurfaceTemp(year) {
+  var lst  = safeLST(year);
+  var jrc  = safeJRC(year);
+  var mask = jrc.eq(2).or(jrc.eq(3)).or(aweiWater);
+  return lst.updateMask(mask).rename('WST_C');
+}
+
+// ================================================================
+// PART 6: WATER QUALITY INDEX (WQI) FROM WST
+// ================================================================
+// Classifies each water pixel into one of four quality risk levels
+// based on temperature thresholds established in the literature:
+//
+//   Class 1 — GOOD     (< 20°C): Low biological activity, high DO,
+//             minimal algal growth risk.
+//   Class 2 — MODERATE (20–25°C): Elevated biological activity,
+//             reduced DO saturation, early eutrophication risk.
+//   Class 3 — POOR     (25–28°C): Cyanobacteria competitive advantage
+//             threshold crossed, significant oxygen depletion risk,
+//             schistosomiasis host snail reproduction accelerates.
+//   Class 4 — CRITICAL (> 28°C): High bloom probability, severe anoxia
+//             risk, pathogen growth rates peak, fish kill threshold.
+//
+// Returns a classified integer image (1–4) masked to water pixels.
+
+var wqiPalette   = ['#2166ac','#fee090','#f46d43','#a50026'];
+var wqiClassNames = ['Good (<20C)','Moderate (20-25C)','Poor (25-28C)','Critical (>28C)'];
+var wqiVis       = {min:1, max:4, palette: wqiPalette};
+
+function waterQualityIndex(year) {
+  var wst = waterSurfaceTemp(year);  // already water-masked
+  return ee.Image(1)                 // default: Good
+    .where(wst.gte(20).and(wst.lt(25)), 2)   // Moderate
+    .where(wst.gte(25).and(wst.lt(28)), 3)   // Poor
+    .where(wst.gte(28), 4)                   // Critical
+    .updateMask(wst.mask())          // restrict to valid WST pixels
+    .rename('WQI')
+    .byte();
+}
+
+// Compute the % area in each WQI class and format as a readable string
+var wqiStatsLabel = ui.Label('WQI: select a year',
+  {fontSize:'13px', color:'#333', margin:'4px 0'});
+
+function updateWQIStats(year, wqiImg) {
+  wqiStatsLabel.setValue('WQI: computing...');
+  var totalPx = wqiImg.gt(0).rename('total');
+
+  // Count pixels in each class
+  var counts = ee.Image.cat([
+    wqiImg.eq(1).rename('good'),
+    wqiImg.eq(2).rename('moderate'),
+    wqiImg.eq(3).rename('poor'),
+    wqiImg.eq(4).rename('critical')
+  ]).reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: roi, scale: 100, maxPixels: 1e8, bestEffort: true
+  });
+
+  counts.evaluate(function(r) {
+    if (!r || (r.good === null && r.moderate === null)) {
+      wqiStatsLabel.setValue('WQI ' + year + ': no thermal data');
+      return;
+    }
+    var g  = r.good     || 0;
+    var m  = r.moderate || 0;
+    var p  = r.poor     || 0;
+    var c  = r.critical || 0;
+    var total = g + m + p + c;
+    if (total === 0) { wqiStatsLabel.setValue('WQI ' + year + ': no data'); return; }
+    var pct = function(n) { return ((n / total) * 100).toFixed(0) + '%'; };
+    wqiStatsLabel.setValue(
+      'WQI ' + year + ' — ' +
+      'Good: '     + pct(g) + '  ' +
+      'Moderate: ' + pct(m) + '  ' +
+      'Poor: '     + pct(p) + '  ' +
+      'Critical: ' + pct(c)
+    );
+  });
+}
+
+// WQI time-series chart: dominant class per year (% of lake area critical/poor)
+var wqiTimeSeries = ui.Chart.image.series({
+  imageCollection: allLandsatST.map(function(img) {
+    var wst = img.select('LST_C').updateMask(aweiWater);
+    // Encode risk as a single continuous stress score (0–3) for charting:
+    // 0=good, 1=moderate, 2=poor, 3=critical — mean gives average stress level
+    var stress = ee.Image(0)
+      .where(wst.gte(20).and(wst.lt(25)), 1)
+      .where(wst.gte(25).and(wst.lt(28)), 2)
+      .where(wst.gte(28), 3)
+      .updateMask(wst.mask())
+      .rename('stress');
+    return stress.set('system:time_start', img.get('system:time_start'));
+  }),
+  region: roi,
+  reducer: ee.Reducer.mean(),
+  scale: 100,
+  xProperty: 'system:time_start'
+}).setOptions({
+  title: "Lake Ol' Bolossat - Thermal Water Quality Stress Index",
+  vAxis: {
+    title: 'Mean Stress Score',
+    viewWindow: {min: 0, max: 3},
+    ticks: [
+      {v:0, f:'Good'},
+      {v:1, f:'Moderate'},
+      {v:2, f:'Poor'},
+      {v:3, f:'Critical'}
+    ]
   },
-  style: {width: '300px'}
+  hAxis: {title:'Year', format:'yyyy'},
+  colors: ['#d73027'],
+  lineWidth: 2, pointSize: 3
 });
 
-function updateMap(year) {
-  Map.layers().reset();
-  
-  var jrcImg = jrcDataset.filter(ee.Filter.calendarRange(year, year, 'year')).first();
-  if (jrcImg) Map.addLayer(jrcImg.clip(roi), waterPalette, 'JRC Water ' + year);
+// ================================================================
+// VISUALIZATION
+// ================================================================
+var waterVis   = {min:0, max:1, palette:['black','blue']};
+var habitatVis = {min:0, max:4, palette:habitatPalette};
+var wstVis     = {
+  min:10, max:35,
+  palette:['#313695','#4575b4','#74add1','#abd9e9','#e0f3f8',
+           '#ffffbf','#fee090','#fdae61','#f46d43','#d73027','#a50026']
+};
 
-  var sarImg = sarWater.filter(ee.Filter.calendarRange(year, year, 'year')).mean();
-  if (sarImg) Map.addLayer(sarImg.clip(roi), waterPalette, 'SAR Water ' + year, false);
+// JRC water class visualization — correct range is 0-3 with distinct colours:
+//   0 = no data (transparent / not shown)
+//   1 = no water (not shown — masked)
+//   2 = seasonal water (light blue)
+//   3 = permanent water (dark blue)
+var jrcVis = {min:2, max:3, palette:['#74add1','#08519c']};
 
-  Map.addLayer(aweiWater.clip(roi), waterPalette, 'AWEI Water', false);
-  
-  var fusion = fusionWaterMap(year);
-  Map.addLayer(fusion.clip(roi), {min: 0, max: 1, palette: ['black', 'cyan']}, 'Fusion Water', false);
+// ================================================================
+// WST STATS
+// ================================================================
+var wstStatsLabel = ui.Label('WST Stats: select a year',
+  {fontSize:'13px', color:'#333', margin:'4px 0'});
 
-  Map.addLayer(habitatMap.clip(roi), habitatVis, 'Habitat Map', false);
+function updateWSTStats(year, wstImg) {
+  wstStatsLabel.setValue('WST: computing...');
+  wstImg.clip(roi).reduceRegion({
+    reducer: ee.Reducer.min().combine(ee.Reducer.mean(),null,true)
+                             .combine(ee.Reducer.max(),null,true),
+    geometry: roi, scale: 100, maxPixels: 1e8, bestEffort: true
+  }).evaluate(function(r) {
+    if (!r || r['WST_C_mean'] == null) {
+      wstStatsLabel.setValue('WST ' + year + ': no data');
+    } else {
+      wstStatsLabel.setValue(
+        'WST ' + year +
+        '  Min: '  + (r['WST_C_min']  != null ? r['WST_C_min'].toFixed(1)  : 'N/A') + ' C' +
+        '  Mean: ' + (r['WST_C_mean'] != null ? r['WST_C_mean'].toFixed(1) : 'N/A') + ' C' +
+        '  Max: '  + (r['WST_C_max']  != null ? r['WST_C_max'].toFixed(1)  : 'N/A') + ' C'
+      );
+    }
+  });
 }
 
-// ==============================================
-// AUTO PLAY LOGIC
-// ==============================================
+// ================================================================
+// MAP UPDATE
+// ================================================================
+function updateMap(year) {
+  Map.layers().reset();
+
+  var jrc = safeJRC(year);
+
+  // Show seasonal (class 2) and permanent (class 3) water as one JRC layer.
+  // Mask out class 0 (no data) and class 1 (no water) so only true water
+  // pixels are displayed, each in its correct colour.
+  var jrcWater = jrc.updateMask(jrc.gte(2));  // hide no-data and no-water
+  Map.addLayer(jrcWater, jrcVis, 'JRC Water ' + year, true);
+
+  // Optional split layers (off by default) for closer inspection
+  Map.addLayer(jrc.updateMask(jrc.eq(2)),
+    {min:2, max:2, palette:['#74add1']}, 'JRC Seasonal ' + year, false);
+  Map.addLayer(jrc.updateMask(jrc.eq(3)),
+    {min:3, max:3, palette:['#08519c']}, 'JRC Permanent ' + year, false);
+
+  Map.addLayer(safeSAR(year).updateMask(safeSAR(year).gt(0)),
+    {min:0, max:1, palette:['#41b6c4']}, 'SAR Water ' + year, false);
+  Map.addLayer(aweiWater.updateMask(aweiWater),
+    {min:0, max:1, palette:['#225ea8']}, 'AWEI Water', false);
+  Map.addLayer(fusionWater(year).updateMask(fusionWater(year)),
+    {min:0, max:1, palette:['cyan']}, 'Fusion Water', false);
+
+  Map.addLayer(habitatMap, habitatVis, 'Habitat Map', false);
+
+  var wst = waterSurfaceTemp(year);
+  Map.addLayer(wst, wstVis, 'Water Surface Temp C ' + year, true);
+  updateWSTStats(year, wst);
+
+  var wqi = waterQualityIndex(year);
+  Map.addLayer(wqi, wqiVis, 'Water Quality Index ' + year, false);
+  updateWQIStats(year, wqi);
+}
+
+// ================================================================
+// TIME SLIDER & AUTOPLAY
+// ================================================================
 var currentYear = 1984;
 var autoplayPaused = false;
 
-function autoplay() {
+var timeSlider = ui.DateSlider({
+  start:'1984-01-01', end:'2025-12-31', value:'2014-01-01',
+  period: 365,
+  onChange: function(dr) {
+    var y = ee.Date(dr.start()).get('year').getInfo();
+    updateMap(y);
+    autoplayPaused = true;
+  },
+  style: {width:'300px'}
+});
+
+ui.util.setInterval(function() {
   if (!autoplayPaused) {
     timeSlider.setValue(ee.Date.fromYMD(currentYear, 1, 1));
     currentYear++;
-    if (currentYear > 2021) currentYear = 1984;
+    if (currentYear > 2025) currentYear = 1984;
   }
-}
-ui.util.setInterval(autoplay, 10000);
+}, 10000);
 
-/ ==============================================
+// ================================================================
 // LEGEND
-// ==============================================
-var legend = ui.Panel({ style: {position: 'bottom-right', padding: '8px'} });
-legend.add(ui.Label('Water & Habitat Classification', {fontWeight: 'bold'}));
+// ================================================================
+var legend = ui.Panel({style:{position:'bottom-right', padding:'8px'}});
+legend.add(ui.Label('Legend', {fontWeight:'bold', fontSize:'14px'}));
+[
+  {color:'#74add1', label:'JRC Seasonal Water'},
+  {color:'#08519c', label:'JRC Permanent Water'},
+  {color:'#41b6c4', label:'SAR Water'},
+  {color:'cyan',    label:'Fusion Water'}
+].concat(classNames.map(function(n,i){ return {color:habitatPalette[i],label:n}; }))
+ .forEach(function(item) {
+   legend.add(ui.Panel([
+     ui.Label({style:{backgroundColor:item.color,padding:'8px',width:'18px',height:'18px'}}),
+     ui.Label({value:item.label, style:{padding:'6px'}})
+   ], ui.Panel.Layout.Flow('horizontal')));
+ });
+legend.add(ui.Label('Water Temp (C)', {fontWeight:'bold', margin:'6px 0 2px 0'}));
+legend.add(ui.Thumbnail({
+  image: ee.Image.pixelLonLat().select('longitude').unitScale(-180,180).multiply(25).add(10),
+  params:{bbox:[-180,-1,180,1], dimensions:'150x15', format:'png',
+          min:10, max:35, palette:wstVis.palette},
+  style:{width:'150px', height:'15px'}
+}));
+legend.add(ui.Panel([
+  ui.Label('10 C',{fontSize:'11px'}),
+  ui.Label('35 C',{fontSize:'11px', margin:'0 0 0 90px'})
+], ui.Panel.Layout.Flow('horizontal')));
 
-var legendItems = [
-  {color: 'black', label: 'No Water'},
-  {color: 'blue', label: 'Detected Water'},
-  {color: 'cyan', label: 'Fusion Water'}
-];
-
-for (var i = 0; i < classNames.length; i++) {
-  legendItems.push({ color: habitatPalette[i], label: classNames[i] });
-}
-
-legendItems.forEach(function(item) {
-  var colorBox = ui.Label({style: {backgroundColor: item.color, padding: '8px', width: '20px', height: '20px'}});
-  var description = ui.Label({value: item.label, style: {padding: '8px'}});
-  legend.add(ui.Panel({widgets: [colorBox, description], layout: ui.Panel.Layout.Flow('horizontal')}));
+// WQI class legend
+legend.add(ui.Label('Water Quality Index', {fontWeight:'bold', margin:'6px 0 2px 0'}));
+wqiClassNames.forEach(function(name, i) {
+  legend.add(ui.Panel([
+    ui.Label({style:{backgroundColor:wqiPalette[i], padding:'8px',
+                     width:'18px', height:'18px'}}),
+    ui.Label({value:name, style:{padding:'6px', fontSize:'12px'}})
+  ], ui.Panel.Layout.Flow('horizontal')));
 });
-
 Map.add(legend);
 
-// ==============================================
-// USER INTERFACE
-// ==============================================
-var titleLabel = ui.Label({
-  value: "Lake Ol' Bolossat Water & Habitat Monitoring",
-  style: {
-    fontWeight: 'bold',
-    fontSize: '22px',
-    color: '#1d3c34',
-    margin: '0 0 5px 0'
-  }
+// ================================================================
+// CHARTS — Water extent using original script logic (feature.byFeature)
+// ================================================================
+
+// Pre-normalise jrcDatasetFull so every image has exactly one band
+// named 'waterClass', safely handling any edge-case 0-band images.
+// JRC YearlyHistory band is already named 'waterClass'; recentAnnual
+// images are also named 'waterClass' — so rename([0]) is safe here
+// only after confirming bands exist via ee.Algorithms.If.
+var jrcNormalised = jrcDatasetFull.map(function(img) {
+  var safe = ee.Image(ee.Algorithms.If(
+    img.bandNames().size().gt(0),
+    img.rename('waterClass').byte(),   // rename all → takes first band safely
+    ee.Image.constant(0).rename('waterClass').byte()
+  ));
+  return safe
+    .updateMask(lakeMask)
+    .set('system:time_start', img.get('system:time_start'));
 });
 
-var descriptionLabel = ui.Label({
-  value: "Lake Ol' Bolossat, a biodiverse freshwater lake in Kenya's Aberdare Range, " +
-         "faces existential threats from anthropogenic pressures and climate variability. " +
-         "This study employs geospatial technologies to map water extent and habitat " +
-         "changes between 1984-2021, identifying: (1) open water, (2) wetlands, " +
-         "(4) grasslands, and (5) agricultural/built-up.",
-  style: {
-    fontSize: '15px',
-    color: '#333333',
-    margin: '0 0 10px 0',
-    whiteSpace: 'normal',  // Allow text wrapping
-    maxWidth: '520px'  // Optional: adjust width as needed
-  }
-});
-
-
-var panel = ui.Panel({
-  widgets: [
-    titleLabel,
-    descriptionLabel,
-    ui.Label('Select year and toggle layers:'),
-    timeSlider
-  ],
-  style: {
-    position: 'top-left',
-    padding: '10px',
-    //backgroundColor: 'rgba(255, 255, 255, 0.8)',
-
-// Generate a bar chart for water extent over the years
-var yearlyWaterArea = jrcDataset.map(function(img) {
+// Replicate the original script's logic exactly:
+// For each annual image, count class-2 (seasonal) AND class-3 (permanent)
+// water pixels multiplied by pixel area, then reduce to a single area value.
+// Uses scale: 30 to match JRC native resolution, consistent with original.
+var yearlyWaterArea = jrcNormalised.map(function(img) {
   var year = ee.Date(img.get('system:time_start')).get('year');
-  var waterArea = img.clip(roi).eq(2).multiply(ee.Image.pixelArea()).reduceRegion({
-    reducer: ee.Reducer.sum(),
-    geometry: roi,
-    scale: 30,
-    maxPixels: 1e13
-  }).get('waterClass');
-  return ee.Feature(null, {'year': year, 'waterArea': waterArea});
+
+  // Seasonal water (class 2) area
+  var seasonalArea = img.eq(2)
+    .multiply(ee.Image.pixelArea())
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: roi,
+      scale: 30,
+      maxPixels: 1e13,
+      bestEffort: true
+    }).get('waterClass');
+
+  // Permanent water (class 3) area
+  var permanentArea = img.eq(3)
+    .multiply(ee.Image.pixelArea())
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: roi,
+      scale: 30,
+      maxPixels: 1e13,
+      bestEffort: true
+    }).get('waterClass');
+
+  // Total water area in sq km (m² / 1e6)
+  var totalArea = ee.Number(seasonalArea).add(ee.Number(permanentArea))
+                    .divide(1e6);
+
+  return ee.Feature(null, {
+    'year':          year,
+    'seasonalArea':  ee.Number(seasonalArea).divide(1e6),
+    'permanentArea': ee.Number(permanentArea).divide(1e6),
+    'totalArea':     totalArea
+  });
 });
 
 var waterExtentChart = ui.Chart.feature.byFeature({
   features: yearlyWaterArea,
   xProperty: 'year',
-  yProperties: ['waterArea']
+  yProperties: ['seasonalArea', 'permanentArea', 'totalArea']
 }).setOptions({
-  title: "Lake Ol' Bolossat Water Extent Over the Years",
-  vAxis: {title: 'Water Area (sq. km)'},
-  hAxis: {title: 'Year'},
-  colors: ['blue']
+  title:   "Lake Ol' Bolossat — Annual Water Extent",
+  vAxis:   {title: 'Water Area (km²)'},
+  hAxis:   {title: 'Year'},
+  series: {
+    0: {color: '#74add1', lineDashStyle: [4,2], lineWidth: 1, pointSize: 2},  // seasonal
+    1: {color: '#1E90FF', lineDashStyle: [4,2], lineWidth: 1, pointSize: 2},  // permanent
+    2: {color: '#08306b', lineWidth: 2,          pointSize: 3}                // total
+  },
+  legend: {position: 'bottom'}
 });
 
-var chartPanel = ui.Panel({
-  widgets: [waterExtentChart],
-  style: {position: 'bottom-left', width: '350px', padding: '8px'}
+// WST chart — Landsat annual mean, scale 100 m
+// Use aweiWater alone as the water mask inside .map() to avoid
+// per-image JRC lookups that can return 0-band images.
+var wstChart = ui.Chart.image.series({
+  imageCollection: allLandsatST.map(function(img) {
+    return img.select('LST_C').updateMask(aweiWater).updateMask(lakeMask)
+              .set('system:time_start', img.get('system:time_start'));
+  }),
+  region: roi,
+  reducer: ee.Reducer.mean(),
+  scale: 100,
+  xProperty: 'system:time_start'
+}).setOptions({
+  title:"Lake Ol' Bolossat - Water Surface Temperature",
+  vAxis:{title:'Mean WST (C)'},
+  hAxis:{title:'Year', format:'yyyy'},
+  colors:['#d73027'], lineWidth:2, pointSize:3
 });
-Map.add(chartPanel);
 
-    maxWidth: '520px'
-  }
-});
+Map.add(ui.Panel([waterExtentChart, wstChart, wqiTimeSeries],null,
+  {position:'bottom-left', width:'400px', padding:'8px'}));
 
-// Initialize map
+// ================================================================
+// CONTROL PANEL
+// ================================================================
+Map.add(ui.Panel([
+  ui.Label("Lake Ol' Bolossat - Water, Habitat & Temperature Monitor",
+    {fontWeight:'bold', fontSize:'17px', color:'#1d3c34', margin:'0 0 4px 0'}),
+  ui.Label(
+    "Maps water extent, habitat, and water surface temperature 1984-2025. " +
+    "JRC archive used for 1984-2021; S2 NDWI + SAR for 2022-2025. " +
+    "WST derived from Landsat TIR (L5/L7/L8/L9).",
+    {fontSize:'12px', color:'#444', margin:'0 0 8px 0', whiteSpace:'normal'}),
+  ui.Label('Select year:', {fontWeight:'bold'}),
+  timeSlider,
+  wstStatsLabel,
+  wqiStatsLabel
+], null, {position:'top-center', padding:'10px', maxWidth:'440px'}));
+
+// ================================================================
+// INIT
+// ================================================================
 Map.centerObject(roi, 12);
-Map.add(panel);
 updateMap(2014);

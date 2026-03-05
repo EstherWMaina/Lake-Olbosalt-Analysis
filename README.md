@@ -1,5 +1,5 @@
 <div style="text-align: center;">
-<img src="https://drive.google.com/file/d/1mKsQHM9R5t33r4OsQgLq2RsPSQKVhrV-/view. olbolsat.PNG" alt="image">
+  <img src="https://drive.google.com/uc?export=view&id=1mKsQHM9R5t33r4OsQgLq2RsPSQKVhrV-" alt="image">
 </div>
 
 
